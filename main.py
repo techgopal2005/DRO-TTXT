@@ -13,17 +13,19 @@ api_hash = os.getenv("API_HASH")
 bot_token = os.getenv("BOT_TOKEN")
 
 DOWNLOAD_PATH = "/tmp"
+GROUP_USERNAME = "yourgroupusername"   # 🔥 CHANGE THIS
 THUMB_URL = "https://static.pw.live/5eb393ee95fab7468a79d189/ADMIN/6e008265-fef8-4357-a290-07e1da1ff964.png"
 
 # BOT CLIENT
 bot = TelegramClient("bot_session", api_id, api_hash).start(bot_token=bot_token)
 
-# STORE USER MODES
+# STORAGE
 user_mode = {}
 user_links = {}
 login_state = {}
-user_clients = {}  # store logged-in account sessions
+user_clients = {}
 
+print("🚀 Bot Started")
 
 # ================= HELPER =================
 def format_duration(seconds):
@@ -54,6 +56,7 @@ async def download_video(url, quality):
         "outtmpl": os.path.join(DOWNLOAD_PATH, "%(title)s.%(ext)s"),
         "merge_output_format": "mp4",
         "quiet": True,
+        "noplaylist": True,
     }
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -90,116 +93,105 @@ async def callback_handler(event):
 
     if event.data == b"bot_mode":
         user_mode[user_id] = "bot"
-        await event.edit("✅ Bot mode selected.\nNow send /drm link")
+        await event.edit("✅ Bot mode selected.\nSend /drm link")
 
     elif event.data == b"account_mode":
         user_mode[user_id] = "account"
         login_state[user_id] = "phone"
-        await event.edit("📱 Send your phone number with country code.")
+        await event.edit("📱 Send phone number with country code.")
 
 
-# ================= LOGIN FLOW =================
+# ================= MESSAGE HANDLER =================
 @bot.on(events.NewMessage)
-async def message_handler(event):
+async def main_handler(event):
     user_id = event.sender_id
-    text = event.text
+    text = event.text.strip()
 
-    # ACCOUNT LOGIN FLOW
+    # ===== ACCOUNT LOGIN FLOW =====
     if user_mode.get(user_id) == "account":
 
         if login_state.get(user_id) == "phone":
-            login_state[user_id] = "otp"
             session_name = f"user_{user_id}"
             user_clients[user_id] = TelegramClient(session_name, api_id, api_hash)
             await user_clients[user_id].connect()
-
             await user_clients[user_id].send_code_request(text)
-            await event.reply("📩 OTP sent. Send OTP now.")
+
+            login_state[user_id] = "otp"
+            return await event.reply("📩 OTP sent. Send OTP.")
 
         elif login_state.get(user_id) == "otp":
             try:
                 await user_clients[user_id].sign_in(code=text)
                 login_state[user_id] = None
-                await event.reply("✅ Account Login Successful!\nNow send /drm link")
+                return await event.reply("✅ Account Login Success.\nSend /drm link")
             except SessionPasswordNeededError:
                 login_state[user_id] = "2fa"
-                await event.reply("🔐 Send your 2-step password.")
+                return await event.reply("🔐 Send 2FA password.")
 
         elif login_state.get(user_id) == "2fa":
             await user_clients[user_id].sign_in(password=text)
             login_state[user_id] = None
-            await event.reply("✅ Account Login Successful!\nNow send /drm link")
+            return await event.reply("✅ Account Login Success.\nSend /drm link")
 
+    # ===== DRM COMMAND =====
+    if text.startswith("/drm"):
+        try:
+            url = text.split(" ", 1)[1]
+            user_links[user_id] = url
+            return await event.reply("🎬 Send quality: 720 or 1080")
+        except:
+            return await event.reply("❌ Use:\n/drm your_link")
 
-# ================= DRM COMMAND =================
-@bot.on(events.NewMessage(pattern="/drm"))
-async def drm_handler(event):
-    user_id = event.sender_id
+    # ===== QUALITY =====
+    if user_id in user_links and text in ["720", "1080"]:
+        url = user_links[user_id]
+        quality = text
 
-    if user_id not in user_mode:
-        return await event.reply("❌ First use /start")
+        status = await event.reply("⬇ Downloading...")
 
-    try:
-        url = event.text.split(" ", 1)[1]
-        user_links[user_id] = url
-        await event.reply("🎬 Send quality: 720 or 1080")
-    except:
-        await event.reply("❌ Use:\n/drm your_link_here")
+        try:
+            file_path, duration, width, height = await download_video(url, quality)
+            thumb = download_thumbnail()
+            formatted_duration = format_duration(duration)
 
+            await status.edit("📤 Uploading...")
 
-# ================= QUALITY =================
-@bot.on(events.NewMessage)
-async def quality_handler(event):
-    user_id = event.sender_id
+            if user_mode.get(user_id) == "account":
+                uploader = user_clients[user_id]
+                target = GROUP_USERNAME  # 🔥 ALWAYS UPLOAD TO GROUP
+            else:
+                uploader = bot
+                target = event.chat_id  # bot uploads in same chat
 
-    if user_id not in user_links:
+            await uploader.send_file(
+                target,
+                file_path,
+                caption=f"✅ Upload Complete!\n⏱ Duration: {formatted_duration}",
+                thumb=thumb,
+                supports_streaming=True,
+                attributes=[
+                    types.DocumentAttributeVideo(
+                        duration=int(duration),
+                        w=width,
+                        h=height,
+                        supports_streaming=True,
+                    )
+                ],
+            )
+
+            await status.edit("✅ Done!")
+
+            os.remove(file_path)
+            os.remove(thumb)
+            del user_links[user_id]
+
+        except Exception as e:
+            await status.edit(f"❌ Error:\n{str(e)}")
+
+    # ===== UNKNOWN MESSAGE =====
+    if not text.startswith("/"):
         return
 
-    if event.text not in ["720", "1080"]:
-        return
 
-    url = user_links[user_id]
-    quality = event.text
-    status = await event.reply("⬇ Downloading...")
-
-    try:
-        file_path, duration, width, height = await download_video(url, quality)
-        thumb = download_thumbnail()
-        formatted_duration = format_duration(duration)
-
-        await status.edit("📤 Uploading...")
-
-        uploader = (
-            bot
-            if user_mode[user_id] == "bot"
-            else user_clients[user_id]
-        )
-
-        await uploader.send_file(
-            event.chat_id,
-            file_path,
-            caption=f"✅ Upload Complete!\n⏱ Duration: {formatted_duration}",
-            thumb=thumb,
-            supports_streaming=True,
-            attributes=[
-                types.DocumentAttributeVideo(
-                    duration=int(duration),
-                    w=width,
-                    h=height,
-                    supports_streaming=True,
-                )
-            ],
-        )
-
-        await status.edit("✅ Done!")
-
-        os.remove(file_path)
-        os.remove(thumb)
-        del user_links[user_id]
-
-    except Exception as e:
-        await status.edit(f"❌ Error:\n{str(e)}")
-
-
-print("🚀 Bot Running...")
+# ================= RUN =================
 bot.run_until_disconnected()
