@@ -1,15 +1,7 @@
 import os
 import asyncio
-import yt_dlp
-import requests
-
-from telethon import TelegramClient, events, Button, types
-from telethon.errors import (
-    FloodWaitError,
-    SessionPasswordNeededError,
-    PhoneCodeInvalidError,
-    PhoneCodeExpiredError
-)
+from telethon import TelegramClient, events, Button
+from telethon.errors import FloodWaitError
 
 # ================= CONFIG =================
 
@@ -17,187 +9,96 @@ api_id = int(os.getenv("API_ID"))
 api_hash = os.getenv("API_HASH")
 bot_token = os.getenv("BOT_TOKEN")
 
-DOWNLOAD_PATH = "/tmp"
-GROUP_USERNAME = "bhj_69"  # without @
+GROUP_USERNAME = os.getenv("GROUP_USERNAME")  # example: @mygroup
 
-# ================= CLIENTS =================
+# ==========================================
 
+# Bot client
 bot = TelegramClient("bot_session", api_id, api_hash)
 
-account_client = TelegramClient(
-    "user_account",
-    api_id,
-    api_hash,
-    device_model="Samsung S23",
-    system_version="Android 13",
-    app_version="10.6.1",
-    lang_code="en"
-)
+# Account client (uses uploaded session)
+account = TelegramClient("user_account", api_id, api_hash)
 
-# ================= STORAGE =================
-
-user_mode = {}
-login_state = {}
-user_links = {}
-
-# ================= START =================
+# ================= START HANDLER =================
 
 @bot.on(events.NewMessage(pattern="/start"))
 async def start_handler(event):
-    await event.reply(
-        "Choose Mode:",
-        buttons=[
-            [Button.inline("🤖 Use Bot", b"bot_mode")],
-            [Button.inline("👤 Use Account", b"account_mode")]
-        ]
-    )
+    buttons = [
+        [Button.inline("🤖 Use Bot", b"bot_mode")],
+        [Button.inline("👤 Use Account", b"account_mode")]
+    ]
+    await event.reply("Choose Mode:", buttons=buttons)
 
-# ================= BUTTON =================
+
+# ================= BUTTON HANDLER =================
 
 @bot.on(events.CallbackQuery)
 async def callback_handler(event):
-    user_id = event.sender_id
 
     if event.data == b"bot_mode":
-        user_mode[user_id] = "bot"
-        await event.edit("✅ Bot Mode Selected.\nSend /drm link")
+        await event.edit("🤖 Bot mode selected.\nSend file or link.")
 
     elif event.data == b"account_mode":
-        user_mode[user_id] = "account"
-        login_state[user_id] = {"step": "phone"}
-        await event.edit("📱 Send your phone number with country code.\nExample: +91XXXXXXXXXX")
 
-# ================= MESSAGE HANDLER =================
+        # Check if session exists
+        if not os.path.exists("user_account.session"):
+            await event.edit("❌ Account session not found on server.")
+            return
+
+        try:
+            await account.connect()
+
+            if not await account.is_user_authorized():
+                await event.edit("❌ Session invalid or expired.")
+                return
+
+            await event.edit("👤 Account mode selected.\nSend file to upload.")
+
+        except Exception as e:
+            await event.edit(f"❌ Account connection error:\n{str(e)}")
+
+
+# ================= FILE HANDLER =================
 
 @bot.on(events.NewMessage)
-async def main_handler(event):
-    if not event.text:
+async def handle_file(event):
+
+    if not event.file:
         return
 
-    user_id = event.sender_id
-    text = event.text.strip()
+    await event.reply("⬆️ Upload started via account...")
 
-    # ===== LOGIN FLOW =====
+    try:
+        await account.connect()
 
-    if user_id in login_state:
-
-        state = login_state[user_id]
-
-        # PHONE STEP
-        if state["step"] == "phone":
-            try:
-                await account_client.connect()
-                sent = await account_client.send_code_request(text)
-                state["phone"] = text
-                state["phone_code_hash"] = sent.phone_code_hash
-                state["step"] = "otp"
-                await event.reply("📨 Enter OTP code received in Telegram")
-            except Exception as e:
-                await event.reply(f"❌ Failed to send code:\n{e}")
+        if not await account.is_user_authorized():
+            await event.reply("❌ Account session expired.")
             return
 
-        # OTP STEP
-        if state["step"] == "otp":
-            try:
-                await account_client.sign_in(
-                    phone=state["phone"],
-                    code=text,
-                    phone_code_hash=state["phone_code_hash"]
-                )
-                await event.reply("✅ Login Successful!")
-                del login_state[user_id]
+        file_path = await event.download_media()
 
-            except PhoneCodeInvalidError:
-                await event.reply("❌ Invalid OTP. Try again.")
-            except PhoneCodeExpiredError:
-                await event.reply("❌ OTP Expired. Send /start again.")
-                del login_state[user_id]
-            except SessionPasswordNeededError:
-                state["step"] = "2fa"
-                await event.reply("🔐 Enter your 2FA password")
-            except Exception as e:
-                await event.reply(f"❌ Login Error:\n{e}")
-            return
+        await account.send_file(
+            GROUP_USERNAME,
+            file_path,
+            caption="Uploaded via account"
+        )
 
-        # 2FA STEP
-        if state["step"] == "2fa":
-            try:
-                await account_client.sign_in(password=text)
-                await event.reply("✅ Login Successful with 2FA!")
-                del login_state[user_id]
-            except Exception as e:
-                await event.reply(f"❌ Wrong Password:\n{e}")
-            return
+        await event.reply("✅ Uploaded successfully.")
 
-    # ===== DRM COMMAND =====
+    except FloodWaitError as e:
+        await event.reply(f"⏳ Flood wait: {e.seconds} seconds.")
+        await asyncio.sleep(e.seconds)
 
-    if text.startswith("/drm"):
-        try:
-            url = text.split(" ", 1)[1]
-            user_links[user_id] = url
-            await event.reply("🎬 Send quality: 720 or 1080")
-        except:
-            await event.reply("Usage:\n/drm link")
-        return
+    except Exception as e:
+        await event.reply(f"❌ Upload error:\n{str(e)}")
 
-    # ===== QUALITY =====
-
-    if user_id in user_links and text in ["720", "1080"]:
-
-        url = user_links[user_id]
-        status = await event.reply("⬇ Downloading...")
-
-        try:
-            ydl_opts = {
-                "format": f"bestvideo[height<={text}]+bestaudio/best",
-                "outtmpl": os.path.join(DOWNLOAD_PATH, "%(title)s.%(ext)s"),
-                "merge_output_format": "mp4",
-                "quiet": True,
-            }
-
-            loop = asyncio.get_event_loop()
-
-            def run():
-                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                    info = ydl.extract_info(url, download=True)
-                    file_path = ydl.prepare_filename(info)
-                    if not file_path.endswith(".mp4"):
-                        file_path = file_path.rsplit(".", 1)[0] + ".mp4"
-                    return file_path, info
-
-            file_path, info = await loop.run_in_executor(None, run)
-
-            await status.edit("📤 Uploading...")
-
-            uploader = bot
-            target = event.chat_id
-
-            if user_mode.get(user_id) == "account":
-                uploader = account_client
-                target = GROUP_USERNAME
-
-            await uploader.send_file(
-                target,
-                file_path,
-                caption="✅ Upload Complete",
-                supports_streaming=True,
-            )
-
-            await status.edit("✅ Upload Done")
-            os.remove(file_path)
-            del user_links[user_id]
-
-        except FloodWaitError as e:
-            await status.edit(f"⚠ FloodWait: {e.seconds}s")
-        except Exception as e:
-            await status.edit(f"❌ Error:\n{e}")
 
 # ================= MAIN =================
 
 async def main():
-    print("🚀 Starting Bot...")
     await bot.start(bot_token=bot_token)
     print("✅ Bot started")
     await bot.run_until_disconnected()
+
 
 asyncio.run(main())
