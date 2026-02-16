@@ -1,115 +1,58 @@
 import os
 import asyncio
 import yt_dlp
-import time
 import requests
-from telethon import TelegramClient, events, types, Button
-from telethon.errors import FloodWaitError, SessionPasswordNeededError, RPCError
+
+from telethon import TelegramClient, events, Button, types
+from telethon.errors import (
+    FloodWaitError,
+    SessionPasswordNeededError,
+    PhoneCodeInvalidError,
+    PhoneCodeExpiredError
+)
 
 # ================= CONFIG =================
+
 api_id = int(os.getenv("API_ID"))
 api_hash = os.getenv("API_HASH")
 bot_token = os.getenv("BOT_TOKEN")
 
 DOWNLOAD_PATH = "/tmp"
-GROUP_USERNAME = "bhj_69"  # Without @
-THUMB_URL = "https://static.pw.live/5eb393ee95fab7468a79d189/ADMIN/6e008265-fef8-4357-a290-07e1da1ff964.png"
+GROUP_USERNAME = "bhj_69"  # without @
 
 # ================= CLIENTS =================
+
 bot = TelegramClient("bot_session", api_id, api_hash)
-account_session_file = "user_account.session"
 
-# Account client (will login later if needed)
-account_client = None
-if os.path.exists(account_session_file):
-    account_client = TelegramClient(account_session_file, api_id, api_hash)
+account_client = TelegramClient(
+    "user_account",
+    api_id,
+    api_hash,
+    device_model="Samsung S23",
+    system_version="Android 13",
+    app_version="10.6.1",
+    lang_code="en"
+)
 
-# STORAGE
+# ================= STORAGE =================
+
 user_mode = {}
+login_state = {}
 user_links = {}
 
-print("🚀 Bot Initialized")
+# ================= START =================
 
-
-# ================= HELPERS =================
-def format_duration(seconds):
-    seconds = int(seconds)
-    h = seconds // 3600
-    m = (seconds % 3600) // 60
-    s = seconds % 60
-    return f"{h:02}:{m:02}:{s:02}" if h else f"{m:02}:{s:02}"
-
-
-def download_thumbnail():
-    thumb_path = os.path.join(DOWNLOAD_PATH, "thumb.jpg")
-    try:
-        r = requests.get(THUMB_URL, timeout=15)
-        r.raise_for_status()
-        with open(thumb_path, "wb") as f:
-            f.write(r.content)
-        return thumb_path
-    except Exception as e:
-        print(f"⚠ Thumbnail download failed: {e}")
-        return None
-
-
-async def download_video(url, quality):
-    fmt = (
-        "bestvideo[height<=720]+bestaudio/best[height<=720]"
-        if quality == "720"
-        else "bestvideo[height<=1080]+bestaudio/best[height<=1080]"
-    )
-
-    ydl_opts = {
-        "format": fmt,
-        "outtmpl": os.path.join(DOWNLOAD_PATH, "%(title)s.%(ext)s"),
-        "merge_output_format": "mp4",
-        "quiet": True,
-        "noplaylist": True,
-        "retries": 3,
-        "fragment_retries": 3,
-        "concurrent_fragment_downloads": 10,
-    }
-
-    try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
-            file_path = ydl.prepare_filename(info)
-            if not file_path.endswith(".mp4"):
-                file_path = file_path.rsplit(".", 1)[0] + ".mp4"
-            return (
-                file_path,
-                info.get("duration", 0),
-                info.get("width", 1280),
-                info.get("height", 720),
-            )
-    except Exception as e:
-        raise Exception(f"Download failed: {e}")
-
-
-# ================= BOT HANDLERS =================
 @bot.on(events.NewMessage(pattern="/start"))
 async def start_handler(event):
-    buttons = [[Button.inline("🤖 Use Bot", b"bot_mode")]]
-    
-    try:
-        # Check if account client exists and is usable
-        if account_client:
-            if not account_client.is_connected():
-                await account_client.connect()
-            if await account_client.is_user_authorized():
-                buttons.append([Button.inline("👤 Use Account", b"account_mode")])
-            else:
-                buttons.append([Button.inline("👤 Use Account (Login Required)", b"account_mode")])
-        else:
-            buttons.append([Button.inline("👤 Use Account (Login Required)", b"account_mode")])
-    except Exception as e:
-        print(f"⚠ Account check failed: {e}")
-        buttons.append([Button.inline("👤 Use Account (Error)", b"account_mode")])
+    await event.reply(
+        "Choose Mode:",
+        buttons=[
+            [Button.inline("🤖 Use Bot", b"bot_mode")],
+            [Button.inline("👤 Use Account", b"account_mode")]
+        ]
+    )
 
-    await event.reply("Choose Mode:", buttons=buttons)
-
-
+# ================= BUTTON =================
 
 @bot.on(events.CallbackQuery)
 async def callback_handler(event):
@@ -117,124 +60,144 @@ async def callback_handler(event):
 
     if event.data == b"bot_mode":
         user_mode[user_id] = "bot"
-        await event.edit("✅ Bot mode selected.\nSend /drm <link>")
+        await event.edit("✅ Bot Mode Selected.\nSend /drm link")
 
     elif event.data == b"account_mode":
-        if not account_client:
-            await event.edit(
-                "❌ Account session not found.\nLogin locally first and upload `user_account.session`."
-            )
-            return
         user_mode[user_id] = "account"
-        await event.edit("✅ Account mode selected.\nSend /drm <link>")
+        login_state[user_id] = {"step": "phone"}
+        await event.edit("📱 Send your phone number with country code.\nExample: +91XXXXXXXXXX")
 
+# ================= MESSAGE HANDLER =================
 
 @bot.on(events.NewMessage)
 async def main_handler(event):
+    if not event.text:
+        return
+
     user_id = event.sender_id
     text = event.text.strip()
 
+    # ===== LOGIN FLOW =====
+
+    if user_id in login_state:
+
+        state = login_state[user_id]
+
+        # PHONE STEP
+        if state["step"] == "phone":
+            try:
+                await account_client.connect()
+                sent = await account_client.send_code_request(text)
+                state["phone"] = text
+                state["phone_code_hash"] = sent.phone_code_hash
+                state["step"] = "otp"
+                await event.reply("📨 Enter OTP code received in Telegram")
+            except Exception as e:
+                await event.reply(f"❌ Failed to send code:\n{e}")
+            return
+
+        # OTP STEP
+        if state["step"] == "otp":
+            try:
+                await account_client.sign_in(
+                    phone=state["phone"],
+                    code=text,
+                    phone_code_hash=state["phone_code_hash"]
+                )
+                await event.reply("✅ Login Successful!")
+                del login_state[user_id]
+
+            except PhoneCodeInvalidError:
+                await event.reply("❌ Invalid OTP. Try again.")
+            except PhoneCodeExpiredError:
+                await event.reply("❌ OTP Expired. Send /start again.")
+                del login_state[user_id]
+            except SessionPasswordNeededError:
+                state["step"] = "2fa"
+                await event.reply("🔐 Enter your 2FA password")
+            except Exception as e:
+                await event.reply(f"❌ Login Error:\n{e}")
+            return
+
+        # 2FA STEP
+        if state["step"] == "2fa":
+            try:
+                await account_client.sign_in(password=text)
+                await event.reply("✅ Login Successful with 2FA!")
+                del login_state[user_id]
+            except Exception as e:
+                await event.reply(f"❌ Wrong Password:\n{e}")
+            return
+
     # ===== DRM COMMAND =====
+
     if text.startswith("/drm"):
         try:
             url = text.split(" ", 1)[1]
             user_links[user_id] = url
-            return await event.reply("🎬 Send quality: 720 or 1080")
-        except Exception:
-            return await event.reply("❌ Invalid command. Use:\n/drm <link>")
+            await event.reply("🎬 Send quality: 720 or 1080")
+        except:
+            await event.reply("Usage:\n/drm link")
+        return
 
     # ===== QUALITY =====
+
     if user_id in user_links and text in ["720", "1080"]:
+
         url = user_links[user_id]
-        quality = text
+        status = await event.reply("⬇ Downloading...")
 
         try:
-            status = await event.reply("⬇ Downloading video...")
-            file_path, duration, width, height = await download_video(url, quality)
-            thumb = download_thumbnail()
-            formatted_duration = format_duration(duration)
+            ydl_opts = {
+                "format": f"bestvideo[height<={text}]+bestaudio/best",
+                "outtmpl": os.path.join(DOWNLOAD_PATH, "%(title)s.%(ext)s"),
+                "merge_output_format": "mp4",
+                "quiet": True,
+            }
 
-            await status.edit("📤 Upload started...")
+            loop = asyncio.get_event_loop()
 
-            # Select uploader
+            def run():
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    info = ydl.extract_info(url, download=True)
+                    file_path = ydl.prepare_filename(info)
+                    if not file_path.endswith(".mp4"):
+                        file_path = file_path.rsplit(".", 1)[0] + ".mp4"
+                    return file_path, info
+
+            file_path, info = await loop.run_in_executor(None, run)
+
+            await status.edit("📤 Uploading...")
+
+            uploader = bot
+            target = event.chat_id
+
             if user_mode.get(user_id) == "account":
                 uploader = account_client
                 target = GROUP_USERNAME
-            else:
-                uploader = bot
-                target = event.chat_id
-
-            # Upload with progress
-            async def progress(current, total):
-                percent = int(current * 100 / total)
-                now = time.time()
-                new_text = f"📤 Uploading... {percent}%"
-                if not hasattr(progress, "last_update"):
-                    progress.last_update = 0
-                    progress.last_text = ""
-                if now - progress.last_update > 5 and new_text != progress.last_text:
-                    try:
-                        await status.edit(new_text)
-                        progress.last_update = now
-                        progress.last_text = new_text
-                    except Exception:
-                        pass
 
             await uploader.send_file(
                 target,
                 file_path,
-                caption=f"✅ Upload Complete!\n⏱ Duration: {formatted_duration}",
-                thumb=thumb,
+                caption="✅ Upload Complete",
                 supports_streaming=True,
-                progress_callback=progress,
-                attributes=[
-                    types.DocumentAttributeVideo(
-                        duration=int(duration),
-                        w=width,
-                        h=height,
-                        supports_streaming=True,
-                    )
-                ],
             )
 
-            await status.edit("✅ Upload Completed!")
-
-            # Cleanup
-            if os.path.exists(file_path):
-                os.remove(file_path)
-            if thumb and os.path.exists(thumb):
-                os.remove(thumb)
+            await status.edit("✅ Upload Done")
+            os.remove(file_path)
             del user_links[user_id]
 
         except FloodWaitError as e:
-            await event.reply(f"⚠ FloodWait: wait {e.seconds} seconds")
-        except RPCError as e:
-            await event.reply(f"❌ Telegram RPC error: {e}")
+            await status.edit(f"⚠ FloodWait: {e.seconds}s")
         except Exception as e:
-            await event.reply(f"❌ Error during download/upload: {e}")
+            await status.edit(f"❌ Error:\n{e}")
 
-    # ===== UNKNOWN MESSAGE =====
-    if not text.startswith("/"):
-        return await event.reply(
-            "❌ Unknown command.\nUse /start to begin or /drm <link> to download"
-        )
+# ================= MAIN =================
 
+async def main():
+    print("🚀 Starting Bot...")
+    await bot.start(bot_token=bot_token)
+    print("✅ Bot started")
+    await bot.run_until_disconnected()
 
-# ================= RUN BOT SAFELY =================
-async def start_bot():
-    while True:
-        try:
-            print("🚀 Starting bot...")
-            await bot.start(bot_token=bot_token)
-            print("✅ Bot started")
-            await bot.run_until_disconnected()
-        except FloodWaitError as e:
-            print(f"⚠ FloodWait: sleeping {e.seconds}s...")
-            await asyncio.sleep(e.seconds)
-        except Exception as e:
-            print(f"❌ Bot crashed: {e}, retrying in 10s...")
-            await asyncio.sleep(10)
-
-
-if __name__ == "__main__":
-    asyncio.run(start_bot())
+asyncio.run(main())
