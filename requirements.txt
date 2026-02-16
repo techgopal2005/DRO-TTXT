@@ -1,0 +1,5 @@
+telethon
+yt-dlp
+requests
+tgcrypto
+ffmpeg-python
