@@ -91,9 +91,24 @@ async def download_video(url, quality):
 @bot.on(events.NewMessage(pattern="/start"))
 async def start_handler(event):
     buttons = [[Button.inline("🤖 Use Bot", b"bot_mode")]]
-    if account_client:
-        buttons.append([Button.inline("👤 Use Account", b"account_mode")])
+    
+    try:
+        # Check if account client exists and is usable
+        if account_client:
+            if not account_client.is_connected():
+                await account_client.connect()
+            if await account_client.is_user_authorized():
+                buttons.append([Button.inline("👤 Use Account", b"account_mode")])
+            else:
+                buttons.append([Button.inline("👤 Use Account (Login Required)", b"account_mode")])
+        else:
+            buttons.append([Button.inline("👤 Use Account (Login Required)", b"account_mode")])
+    except Exception as e:
+        print(f"⚠ Account check failed: {e}")
+        buttons.append([Button.inline("👤 Use Account (Error)", b"account_mode")])
+
     await event.reply("Choose Mode:", buttons=buttons)
+
 
 
 @bot.on(events.CallbackQuery)
