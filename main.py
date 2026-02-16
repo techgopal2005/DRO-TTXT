@@ -5,7 +5,7 @@ import time
 import requests
 
 from telethon import TelegramClient, events, types, Button
-from telethon.errors import SessionPasswordNeededError, FloodWaitError
+from telethon.errors import FloodWaitError, SessionPasswordNeededError
 
 # ================= CONFIG =================
 api_id = int(os.getenv("API_ID"))
@@ -13,17 +13,23 @@ api_hash = os.getenv("API_HASH")
 bot_token = os.getenv("BOT_TOKEN")
 
 DOWNLOAD_PATH = "/tmp"
-GROUP_USERNAME = "@bhj_69"   # 🔥 Replace with your group's username
+GROUP_USERNAME = "bhj_69"  # 🔥 Replace with your group's username without @
 THUMB_URL = "https://static.pw.live/5eb393ee95fab7468a79d189/ADMIN/6e008265-fef8-4357-a290-07e1da1ff964.png"
 
-# BOT CLIENT
+# ================= CLIENTS =================
 bot = TelegramClient("bot_session", api_id, api_hash).start(bot_token=bot_token)
+account_session_file = "user_account.session"  # Pre-saved session file for account mode
+
+# Initialize account client if session exists
+if os.path.exists(account_session_file):
+    account_client = TelegramClient(account_session_file, api_id, api_hash)
+    asyncio.get_event_loop().run_until_complete(account_client.start())
+else:
+    account_client = None  # Will notify user to create session locally
 
 # STORAGE
 user_mode = {}
 user_links = {}
-login_state = {}
-user_clients = {}
 
 print("🚀 Bot Started")
 
@@ -34,7 +40,6 @@ def format_duration(seconds):
     m = (seconds % 3600) // 60
     s = seconds % 60
     return f"{h:02}:{m:02}:{s:02}" if h > 0 else f"{m:02}:{s:02}"
-
 
 def download_thumbnail():
     thumb_path = os.path.join(DOWNLOAD_PATH, "thumb.jpg")
@@ -47,7 +52,6 @@ def download_thumbnail():
     except Exception as e:
         print(f"⚠ Thumbnail download failed: {e}")
         return None
-
 
 async def download_video(url, quality):
     format_string = (
@@ -84,18 +88,13 @@ async def download_video(url, quality):
     except Exception as e:
         raise Exception(f"Download failed: {e}")
 
-
 # ================= START =================
 @bot.on(events.NewMessage(pattern="/start"))
 async def start_handler(event):
-    await event.reply(
-        "Choose Mode:",
-        buttons=[
-            [Button.inline("🤖 Use Bot", b"bot_mode")],
-            [Button.inline("👤 Use Account", b"account_mode")],
-        ],
-    )
-
+    buttons = [[Button.inline("🤖 Use Bot", b"bot_mode")]]
+    if account_client:
+        buttons.append([Button.inline("👤 Use Account", b"account_mode")])
+    await event.reply("Choose Mode:", buttons=buttons)
 
 # ================= BUTTON HANDLER =================
 @bot.on(events.CallbackQuery)
@@ -107,44 +106,17 @@ async def callback_handler(event):
         await event.edit("✅ Bot mode selected.\nSend /drm link")
 
     elif event.data == b"account_mode":
+        if not account_client:
+            await event.edit("❌ Account session not found.\nCreate session locally and upload `user_account.session`.")
+            return
         user_mode[user_id] = "account"
-        login_state[user_id] = "phone"
-        await event.edit("📱 Send phone number with country code.")
+        await event.edit("✅ Account mode selected.\nSend /drm link")
 
-
-# ================= MAIN HANDLER =================
+# ================= MESSAGE HANDLER =================
 @bot.on(events.NewMessage)
 async def main_handler(event):
     user_id = event.sender_id
     text = event.text.strip()
-
-    # ===== ACCOUNT LOGIN FLOW =====
-    if user_mode.get(user_id) == "account":
-        try:
-            if login_state.get(user_id) == "phone":
-                session_name = f"user_{user_id}"
-                user_clients[user_id] = TelegramClient(session_name, api_id, api_hash)
-                await user_clients[user_id].connect()
-                await user_clients[user_id].send_code_request(text)
-
-                login_state[user_id] = "otp"
-                return await event.reply("📩 OTP sent. Send OTP.")
-
-            elif login_state.get(user_id) == "otp":
-                try:
-                    await user_clients[user_id].sign_in(code=text)
-                    login_state[user_id] = None
-                    return await event.reply("✅ Account Login Success.\nSend /drm link")
-                except SessionPasswordNeededError:
-                    login_state[user_id] = "2fa"
-                    return await event.reply("🔐 Send 2FA password.")
-
-            elif login_state.get(user_id) == "2fa":
-                await user_clients[user_id].sign_in(password=text)
-                login_state[user_id] = None
-                return await event.reply("✅ Account Login Success.\nSend /drm link")
-        except Exception as e:
-            return await event.reply(f"❌ Login error: {e}")
 
     # ===== DRM COMMAND =====
     if text.startswith("/drm"):
@@ -161,23 +133,22 @@ async def main_handler(event):
         quality = text
 
         try:
-            status = await event.reply("⬇ Downloading...")
-
+            status = await event.reply("⬇ Downloading video...")
             file_path, duration, width, height = await download_video(url, quality)
             thumb = download_thumbnail()
             formatted_duration = format_duration(duration)
 
-            # Notify user upload is starting
             await status.edit("📤 Upload started...")
 
+            # Determine uploader and target
             if user_mode.get(user_id) == "account":
-                uploader = user_clients[user_id]
-                target = GROUP_USERNAME  # Upload to group
+                uploader = account_client
+                target = GROUP_USERNAME
             else:
                 uploader = bot
-                target = event.chat_id  # Bot uploads in same chat
+                target = event.chat_id
 
-            # Upload file
+            # Upload
             await uploader.send_file(
                 target,
                 file_path,
@@ -206,14 +177,13 @@ async def main_handler(event):
         except FloodWaitError as e:
             await event.reply(f"⚠ FloodWait: wait {e.seconds} seconds")
         except Exception as e:
-            await event.reply(f"❌ Error during upload: {e}")
+            await event.reply(f"❌ Error during download/upload: {e}")
 
     # ===== UNKNOWN MESSAGE =====
     if not text.startswith("/"):
         return await event.reply(
             "❌ Unknown command.\nUse /start to begin or /drm link to download"
         )
-
 
 # ================= RUN =================
 bot.run_until_disconnected()
