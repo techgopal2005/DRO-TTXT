@@ -5,24 +5,19 @@ import time
 import requests
 
 from telethon import TelegramClient, events, types, Button
-from telethon.errors import (
-    FloodWaitError,
-    SessionPasswordNeededError,
-    PhoneCodeExpiredError,
-    PhoneCodeInvalidError,
-)
+from telethon.errors import FloodWaitError
 
 # ================= CONFIG =================
 api_id = int(os.getenv("API_ID"))
 api_hash = os.getenv("API_HASH")
 bot_token = os.getenv("BOT_TOKEN")
 
-GROUP_USERNAME = "bhj_69"  # without @
 DOWNLOAD_PATH = "/tmp"
+GROUP_USERNAME = "bhj_69"  # without @
 THUMB_URL = "https://static.pw.live/5eb393ee95fab7468a79d189/ADMIN/6e008265-fef8-4357-a290-07e1da1ff964.png"
 
 # ================= CLIENTS =================
-bot = TelegramClient("bot_session", api_id, api_hash).start(bot_token=bot_token)
+bot = TelegramClient("bot_session", api_id, api_hash)
 
 account_client = TelegramClient(
     "user_account",
@@ -37,10 +32,21 @@ account_client = TelegramClient(
 # ================= STORAGE =================
 user_mode = {}
 user_links = {}
-login_state = {}
-login_data = {}
 
-print("🚀 Bot Started")
+# ================= START CLIENTS =================
+async def start_clients():
+    await bot.start(bot_token=bot_token)
+
+    # Start account only if session exists
+    if os.path.exists("user_account.session"):
+        await account_client.start()
+        print("👤 Account session loaded")
+    else:
+        print("⚠ No account session found")
+
+    print("🚀 Bot Started")
+
+asyncio.get_event_loop().run_until_complete(start_clients())
 
 # ================= HELPERS =================
 def format_duration(seconds):
@@ -53,7 +59,7 @@ def format_duration(seconds):
 def download_thumbnail():
     try:
         path = os.path.join(DOWNLOAD_PATH, "thumb.jpg")
-        r = requests.get(THUMB_URL, timeout=10)
+        r = requests.get(THUMB_URL, timeout=15)
         with open(path, "wb") as f:
             f.write(r.content)
         return path
@@ -89,16 +95,16 @@ async def download_video(url, quality):
             info.get("height", 720),
         )
 
-# ================= START =================
-@bot.on(events.NewMessage(pattern="/start"))
+# ================= START COMMAND =================
+@bot.on(events.NewMessage(pattern=r"^/start"))
 async def start_handler(event):
     buttons = [
         [Button.inline("🤖 Use Bot", b"bot_mode")],
-        [Button.inline("👤 Use Account", b"account_mode")],
+        [Button.inline("👤 Use Account", b"account_mode")]
     ]
-    await event.reply("Choose mode:", buttons=buttons)
+    await event.respond("Choose Mode:", buttons=buttons)
 
-# ================= BUTTON =================
+# ================= BUTTON HANDLER =================
 @bot.on(events.CallbackQuery)
 async def callback_handler(event):
     user_id = event.sender_id
@@ -108,63 +114,25 @@ async def callback_handler(event):
         await event.edit("✅ Bot mode selected.\nSend /drm link")
 
     elif event.data == b"account_mode":
-        user_mode[user_id] = "account"
-
         if not await account_client.is_user_authorized():
-            login_state[user_id] = "await_phone"
-            return await event.edit("📱 Send your phone number with country code\nExample: +919876543210")
+            return await event.edit(
+                "❌ Account not logged in.\nUpload user_account.session file first."
+            )
 
-        await event.edit("✅ Account already logged in.\nSend /drm link")
+        user_mode[user_id] = "account"
+        await event.edit("✅ Account mode selected.\nSend /drm link")
 
-# ================= MESSAGE HANDLER =================
+# ================= MAIN HANDLER =================
 @bot.on(events.NewMessage)
 async def main_handler(event):
     user_id = event.sender_id
     text = event.text.strip()
 
-    # ===== LOGIN FLOW =====
-    if login_state.get(user_id) == "await_phone":
-        try:
-            sent = await account_client.send_code_request(text)
-            login_data[user_id] = {
-                "phone": text,
-                "phone_code_hash": sent.phone_code_hash
-            }
-            login_state[user_id] = "await_code"
-            return await event.reply("📩 OTP sent. Send the OTP.")
-        except Exception as e:
-            return await event.reply(f"❌ Failed to send OTP:\n{e}")
+    # Ignore /start (already handled)
+    if text.startswith("/start"):
+        return
 
-    if login_state.get(user_id) == "await_code":
-        try:
-            data = login_data[user_id]
-            await account_client.sign_in(
-                phone=data["phone"],
-                code=text,
-                phone_code_hash=data["phone_code_hash"]
-            )
-            login_state.pop(user_id)
-            return await event.reply("✅ Account login successful!")
-        except SessionPasswordNeededError:
-            login_state[user_id] = "await_2fa"
-            return await event.reply("🔐 Send your 2-step password.")
-        except (PhoneCodeExpiredError, PhoneCodeInvalidError):
-            login_state.pop(user_id)
-            return await event.reply("❌ OTP expired or invalid. Try again.")
-        except Exception as e:
-            login_state.pop(user_id)
-            return await event.reply(f"❌ Login error:\n{e}")
-
-    if login_state.get(user_id) == "await_2fa":
-        try:
-            await account_client.sign_in(password=text)
-            login_state.pop(user_id)
-            return await event.reply("✅ 2FA successful. Account logged in!")
-        except Exception as e:
-            login_state.pop(user_id)
-            return await event.reply(f"❌ Wrong password:\n{e}")
-
-    # ===== DRM =====
+    # ===== DRM COMMAND =====
     if text.startswith("/drm"):
         try:
             url = text.split(" ", 1)[1]
@@ -178,7 +146,7 @@ async def main_handler(event):
         url = user_links[user_id]
         quality = text
 
-        status = await event.reply("⬇ Downloading...")
+        status = await event.reply("⬇ Downloading video...")
 
         try:
             file_path, duration, width, height = await download_video(url, quality)
@@ -191,8 +159,6 @@ async def main_handler(event):
             target = event.chat_id
 
             if user_mode.get(user_id) == "account":
-                if not await account_client.is_user_authorized():
-                    return await status.edit("❌ Account not logged in.")
                 uploader = account_client
                 target = GROUP_USERNAME
 
@@ -207,21 +173,25 @@ async def main_handler(event):
                         duration=int(duration),
                         w=width,
                         h=height,
-                        supports_streaming=True
+                        supports_streaming=True,
                     )
-                ]
+                ],
             )
 
             await status.edit("✅ Upload Completed!")
 
+            # Cleanup
             if os.path.exists(file_path):
                 os.remove(file_path)
             if thumb and os.path.exists(thumb):
                 os.remove(thumb)
 
-            user_links.pop(user_id)
+            user_links.pop(user_id, None)
 
         except FloodWaitError as e:
-            await status.edit(f"⚠ FloodWait: Wait {e.seconds} sec")
+            await status.edit(f"⚠ FloodWait: Wait {e.seconds} seconds")
         except Exception as e:
             await status.edit(f"❌ Error:\n{e}")
+
+# ================= RUN =================
+bot.run_until_disconnected()
