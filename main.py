@@ -15,17 +15,41 @@ bot_token = os.getenv("BOT_TOKEN")
 DOWNLOAD_PATH = "/tmp"
 GROUP_USERNAME = "bhj_69"  # 🔥 Replace with your group's username without @
 THUMB_URL = "https://static.pw.live/5eb393ee95fab7468a79d189/ADMIN/6e008265-fef8-4357-a290-07e1da1ff964.png"
+USE_PROXY = False
+PROXY = ("socks5", "ip_address", 1080, True, "username", "password")  # Example if needed
 
 # ================= CLIENTS =================
+# Bot client
 bot = TelegramClient("bot_session", api_id, api_hash).start(bot_token=bot_token)
-account_session_file = "user_account.session"  # Pre-saved session file for account mode
 
-# Initialize account client if session exists
+# Account client with proper device info and optional proxy
+account_session_file = "user_account.session"
+
 if os.path.exists(account_session_file):
-    account_client = TelegramClient(account_session_file, api_id, api_hash)
+    if USE_PROXY:
+        account_client = TelegramClient(
+            account_session_file,
+            api_id,
+            api_hash,
+            proxy=PROXY,
+            device_model="OnePlus 9",
+            system_version="11",
+            app_version="9.3.0",
+            lang_code="en"
+        )
+    else:
+        account_client = TelegramClient(
+            account_session_file,
+            api_id,
+            api_hash,
+            device_model="OnePlus 9",
+            system_version="11",
+            app_version="9.3.0",
+            lang_code="en"
+        )
     asyncio.get_event_loop().run_until_complete(account_client.start())
 else:
-    account_client = None  # Will notify user to create session locally
+    account_client = None
 
 # STORAGE
 user_mode = {}
@@ -107,12 +131,12 @@ async def callback_handler(event):
 
     elif event.data == b"account_mode":
         if not account_client:
-            await event.edit("❌ Account session not found.\nCreate session locally and upload `user_account.session`.")
+            await event.edit("❌ Account session not found.\nLogin locally first and upload `user_account.session`.")
             return
         user_mode[user_id] = "account"
         await event.edit("✅ Account mode selected.\nSend /drm link")
 
-# ================= MESSAGE HANDLER =================
+# ================= MAIN HANDLER =================
 @bot.on(events.NewMessage)
 async def main_handler(event):
     user_id = event.sender_id
