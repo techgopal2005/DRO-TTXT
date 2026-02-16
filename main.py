@@ -5,7 +5,7 @@ import time
 import requests
 
 from telethon import TelegramClient, events, types, Button
-from telethon.errors import SessionPasswordNeededError
+from telethon.errors import SessionPasswordNeededError, FloodWaitError
 
 # ================= CONFIG =================
 api_id = int(os.getenv("API_ID"))
@@ -13,7 +13,7 @@ api_hash = os.getenv("API_HASH")
 bot_token = os.getenv("BOT_TOKEN")
 
 DOWNLOAD_PATH = "/tmp"
-GROUP_USERNAME = "@bhj_69"   # 🔥 CHANGE THIS
+GROUP_USERNAME = "@bhj_69"   # 🔥 Replace with your group's username
 THUMB_URL = "https://static.pw.live/5eb393ee95fab7468a79d189/ADMIN/6e008265-fef8-4357-a290-07e1da1ff964.png"
 
 # BOT CLIENT
@@ -27,7 +27,7 @@ user_clients = {}
 
 print("🚀 Bot Started")
 
-# ================= HELPER =================
+# ================= HELPERS =================
 def format_duration(seconds):
     seconds = int(seconds)
     h = seconds // 3600
@@ -38,10 +38,15 @@ def format_duration(seconds):
 
 def download_thumbnail():
     thumb_path = os.path.join(DOWNLOAD_PATH, "thumb.jpg")
-    r = requests.get(THUMB_URL)
-    with open(thumb_path, "wb") as f:
-        f.write(r.content)
-    return thumb_path
+    try:
+        r = requests.get(THUMB_URL, timeout=15)
+        r.raise_for_status()
+        with open(thumb_path, "wb") as f:
+            f.write(r.content)
+        return thumb_path
+    except Exception as e:
+        print(f"⚠ Thumbnail download failed: {e}")
+        return None
 
 
 async def download_video(url, quality):
@@ -57,21 +62,27 @@ async def download_video(url, quality):
         "merge_output_format": "mp4",
         "quiet": True,
         "noplaylist": True,
+        "retries": 3,
+        "fragment_retries": 3,
+        "concurrent_fragment_downloads": 10,
     }
 
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=True)
-        file_path = ydl.prepare_filename(info)
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+            file_path = ydl.prepare_filename(info)
 
-        if not file_path.endswith(".mp4"):
-            file_path = file_path.rsplit(".", 1)[0] + ".mp4"
+            if not file_path.endswith(".mp4"):
+                file_path = file_path.rsplit(".", 1)[0] + ".mp4"
 
-        return (
-            file_path,
-            info.get("duration", 0),
-            info.get("width", 1280),
-            info.get("height", 720),
-        )
+            return (
+                file_path,
+                info.get("duration", 0),
+                info.get("width", 1280),
+                info.get("height", 720),
+            )
+    except Exception as e:
+        raise Exception(f"Download failed: {e}")
 
 
 # ================= START =================
@@ -101,7 +112,7 @@ async def callback_handler(event):
         await event.edit("📱 Send phone number with country code.")
 
 
-# ================= MESSAGE HANDLER =================
+# ================= MAIN HANDLER =================
 @bot.on(events.NewMessage)
 async def main_handler(event):
     user_id = event.sender_id
@@ -109,29 +120,31 @@ async def main_handler(event):
 
     # ===== ACCOUNT LOGIN FLOW =====
     if user_mode.get(user_id) == "account":
+        try:
+            if login_state.get(user_id) == "phone":
+                session_name = f"user_{user_id}"
+                user_clients[user_id] = TelegramClient(session_name, api_id, api_hash)
+                await user_clients[user_id].connect()
+                await user_clients[user_id].send_code_request(text)
 
-        if login_state.get(user_id) == "phone":
-            session_name = f"user_{user_id}"
-            user_clients[user_id] = TelegramClient(session_name, api_id, api_hash)
-            await user_clients[user_id].connect()
-            await user_clients[user_id].send_code_request(text)
+                login_state[user_id] = "otp"
+                return await event.reply("📩 OTP sent. Send OTP.")
 
-            login_state[user_id] = "otp"
-            return await event.reply("📩 OTP sent. Send OTP.")
+            elif login_state.get(user_id) == "otp":
+                try:
+                    await user_clients[user_id].sign_in(code=text)
+                    login_state[user_id] = None
+                    return await event.reply("✅ Account Login Success.\nSend /drm link")
+                except SessionPasswordNeededError:
+                    login_state[user_id] = "2fa"
+                    return await event.reply("🔐 Send 2FA password.")
 
-        elif login_state.get(user_id) == "otp":
-            try:
-                await user_clients[user_id].sign_in(code=text)
+            elif login_state.get(user_id) == "2fa":
+                await user_clients[user_id].sign_in(password=text)
                 login_state[user_id] = None
                 return await event.reply("✅ Account Login Success.\nSend /drm link")
-            except SessionPasswordNeededError:
-                login_state[user_id] = "2fa"
-                return await event.reply("🔐 Send 2FA password.")
-
-        elif login_state.get(user_id) == "2fa":
-            await user_clients[user_id].sign_in(password=text)
-            login_state[user_id] = None
-            return await event.reply("✅ Account Login Success.\nSend /drm link")
+        except Exception as e:
+            return await event.reply(f"❌ Login error: {e}")
 
     # ===== DRM COMMAND =====
     if text.startswith("/drm"):
@@ -139,30 +152,32 @@ async def main_handler(event):
             url = text.split(" ", 1)[1]
             user_links[user_id] = url
             return await event.reply("🎬 Send quality: 720 or 1080")
-        except:
-            return await event.reply("❌ Use:\n/drm your_link")
+        except Exception as e:
+            return await event.reply(f"❌ Invalid command. Use:\n/drm your_link\nError: {e}")
 
     # ===== QUALITY =====
     if user_id in user_links and text in ["720", "1080"]:
         url = user_links[user_id]
         quality = text
 
-        status = await event.reply("⬇ Downloading...")
-
         try:
+            status = await event.reply("⬇ Downloading...")
+
             file_path, duration, width, height = await download_video(url, quality)
             thumb = download_thumbnail()
             formatted_duration = format_duration(duration)
 
-            await status.edit("📤 Uploading...")
+            # Notify user upload is starting
+            await status.edit("📤 Upload started...")
 
             if user_mode.get(user_id) == "account":
                 uploader = user_clients[user_id]
-                target = GROUP_USERNAME  # 🔥 ALWAYS UPLOAD TO GROUP
+                target = GROUP_USERNAME  # Upload to group
             else:
                 uploader = bot
-                target = event.chat_id  # bot uploads in same chat
+                target = event.chat_id  # Bot uploads in same chat
 
+            # Upload file
             await uploader.send_file(
                 target,
                 file_path,
@@ -179,18 +194,25 @@ async def main_handler(event):
                 ],
             )
 
-            await status.edit("✅ Done!")
+            await status.edit("✅ Upload Completed!")
 
-            os.remove(file_path)
-            os.remove(thumb)
+            # Cleanup
+            if os.path.exists(file_path):
+                os.remove(file_path)
+            if thumb and os.path.exists(thumb):
+                os.remove(thumb)
             del user_links[user_id]
 
+        except FloodWaitError as e:
+            await event.reply(f"⚠ FloodWait: wait {e.seconds} seconds")
         except Exception as e:
-            await status.edit(f"❌ Error:\n{str(e)}")
+            await event.reply(f"❌ Error during upload: {e}")
 
     # ===== UNKNOWN MESSAGE =====
     if not text.startswith("/"):
-        return
+        return await event.reply(
+            "❌ Unknown command.\nUse /start to begin or /drm link to download"
+        )
 
 
 # ================= RUN =================
