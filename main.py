@@ -13,7 +13,7 @@ api_hash = os.getenv("API_HASH")
 bot_token = os.getenv("BOT_TOKEN")
 
 DOWNLOAD_PATH = "/tmp"
-GROUP_USERNAME = "yourgroupusername"   # 🔥 CHANGE THIS
+GROUP_USERNAME = "@bhj_69"   # 🔥 CHANGE THIS
 THUMB_URL = "https://static.pw.live/5eb393ee95fab7468a79d189/ADMIN/6e008265-fef8-4357-a290-07e1da1ff964.png"
 
 # BOT CLIENT
