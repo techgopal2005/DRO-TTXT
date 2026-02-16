@@ -1,7 +1,5 @@
 import os
-import asyncio
 import yt_dlp
-import time
 import requests
 
 from telethon import TelegramClient, events, types, Button
@@ -18,7 +16,6 @@ THUMB_URL = "https://static.pw.live/5eb393ee95fab7468a79d189/ADMIN/6e008265-fef8
 
 # ================= CLIENTS =================
 bot = TelegramClient("bot_session", api_id, api_hash)
-
 account_client = TelegramClient(
     "user_account",
     api_id,
@@ -26,27 +23,10 @@ account_client = TelegramClient(
     device_model="Samsung Galaxy S23",
     system_version="13",
     app_version="10.0.1",
-    lang_code="en"
 )
 
-# ================= STORAGE =================
 user_mode = {}
 user_links = {}
-
-# ================= START CLIENTS =================
-async def start_clients():
-    await bot.start(bot_token=bot_token)
-
-    # Start account only if session exists
-    if os.path.exists("user_account.session"):
-        await account_client.start()
-        print("👤 Account session loaded")
-    else:
-        print("⚠ No account session found")
-
-    print("🚀 Bot Started")
-
-asyncio.get_event_loop().run_until_complete(start_clients())
 
 # ================= HELPERS =================
 def format_duration(seconds):
@@ -58,15 +38,15 @@ def format_duration(seconds):
 
 def download_thumbnail():
     try:
-        path = os.path.join(DOWNLOAD_PATH, "thumb.jpg")
-        r = requests.get(THUMB_URL, timeout=15)
+        path = f"{DOWNLOAD_PATH}/thumb.jpg"
+        r = requests.get(THUMB_URL, timeout=10)
         with open(path, "wb") as f:
             f.write(r.content)
         return path
     except:
         return None
 
-async def download_video(url, quality):
+def download_video(url, quality):
     format_string = (
         "bestvideo[height<=720]+bestaudio/best[height<=720]"
         if quality == "720"
@@ -75,7 +55,7 @@ async def download_video(url, quality):
 
     ydl_opts = {
         "format": format_string,
-        "outtmpl": os.path.join(DOWNLOAD_PATH, "%(title)s.%(ext)s"),
+        "outtmpl": f"{DOWNLOAD_PATH}/%(title)s.%(ext)s",
         "merge_output_format": "mp4",
         "quiet": True,
         "noplaylist": True,
@@ -95,16 +75,17 @@ async def download_video(url, quality):
             info.get("height", 720),
         )
 
-# ================= START COMMAND =================
+# ================= START =================
 @bot.on(events.NewMessage(pattern=r"^/start"))
 async def start_handler(event):
+    print("START COMMAND RECEIVED")  # Debug log
     buttons = [
         [Button.inline("🤖 Use Bot", b"bot_mode")],
         [Button.inline("👤 Use Account", b"account_mode")]
     ]
     await event.respond("Choose Mode:", buttons=buttons)
 
-# ================= BUTTON HANDLER =================
+# ================= BUTTON =================
 @bot.on(events.CallbackQuery)
 async def callback_handler(event):
     user_id = event.sender_id
@@ -115,45 +96,38 @@ async def callback_handler(event):
 
     elif event.data == b"account_mode":
         if not await account_client.is_user_authorized():
-            return await event.edit(
-                "❌ Account not logged in.\nUpload user_account.session file first."
-            )
-
+            return await event.edit("❌ Account session not found.")
         user_mode[user_id] = "account"
         await event.edit("✅ Account mode selected.\nSend /drm link")
 
-# ================= MAIN HANDLER =================
+# ================= MAIN =================
 @bot.on(events.NewMessage)
 async def main_handler(event):
-    user_id = event.sender_id
     text = event.text.strip()
+    user_id = event.sender_id
 
-    # Ignore /start (already handled)
     if text.startswith("/start"):
         return
 
-    # ===== DRM COMMAND =====
     if text.startswith("/drm"):
         try:
             url = text.split(" ", 1)[1]
             user_links[user_id] = url
             return await event.reply("🎬 Send quality: 720 or 1080")
         except:
-            return await event.reply("❌ Use:\n/drm your_link")
+            return await event.reply("❌ Use:\n/drm link")
 
-    # ===== QUALITY =====
     if user_id in user_links and text in ["720", "1080"]:
         url = user_links[user_id]
         quality = text
 
-        status = await event.reply("⬇ Downloading video...")
+        status = await event.reply("⬇ Downloading...")
 
         try:
-            file_path, duration, width, height = await download_video(url, quality)
+            file_path, duration, width, height = download_video(url, quality)
             thumb = download_thumbnail()
-            formatted_duration = format_duration(duration)
 
-            await status.edit("📤 Upload started...")
+            await status.edit("📤 Uploading...")
 
             uploader = bot
             target = event.chat_id
@@ -165,7 +139,7 @@ async def main_handler(event):
             await uploader.send_file(
                 target,
                 file_path,
-                caption=f"✅ Upload Complete!\n⏱ Duration: {formatted_duration}",
+                caption="✅ Upload Complete!",
                 thumb=thumb,
                 supports_streaming=True,
                 attributes=[
@@ -178,20 +152,22 @@ async def main_handler(event):
                 ],
             )
 
-            await status.edit("✅ Upload Completed!")
-
-            # Cleanup
-            if os.path.exists(file_path):
-                os.remove(file_path)
-            if thumb and os.path.exists(thumb):
-                os.remove(thumb)
-
-            user_links.pop(user_id, None)
+            await status.edit("✅ Done")
 
         except FloodWaitError as e:
-            await status.edit(f"⚠ FloodWait: Wait {e.seconds} seconds")
+            await status.edit(f"FloodWait {e.seconds}s")
         except Exception as e:
-            await status.edit(f"❌ Error:\n{e}")
+            await status.edit(f"Error: {e}")
 
 # ================= RUN =================
-bot.run_until_disconnected()
+if __name__ == "__main__":
+    bot.start(bot_token=bot_token)
+
+    if os.path.exists("user_account.session"):
+        account_client.start()
+        print("Account session loaded")
+    else:
+        print("No account session found")
+
+    print("🚀 Bot Running...")
+    bot.run_until_disconnected()
